@@ -335,7 +335,6 @@
   <p class="ft-tag">Meet the world, meet yourself.</p>
   <p class="ft-org">一般社団法人日本 grow wellness 協会</p>
 </footer>
-
 <script>
 // ═══════════════════════════════════════════
 // 設定（必要に応じて変更してください）
@@ -344,6 +343,88 @@ const GAS_URL   = "https://script.google.com/macros/s/AKfycbwcuA3apibqt9UG69CAR9
 const LINE_URL  = "https://lin.ee/6nZAGA5";
 const MAIL_TO   = "hello@growwellness.world";
 
+// ═══════════════════════════════════════════
+// トラッキング（途中離脱も含めて記録）
+// ═══════════════════════════════════════════
+const SESSION_ID = (()=>{
+  try{
+    let id = sessionStorage.getItem("diagSid");
+    if(!id){
+      id = (crypto.randomUUID ? crypto.randomUUID() : Date.now()+"-"+Math.random().toString(36).slice(2,10));
+      sessionStorage.setItem("diagSid", id);
+    }
+    return id;
+  }catch(e){
+    return Date.now()+"-"+Math.random().toString(36).slice(2,10);
+  }
+})();
+const STARTED_AT = (()=>{
+  try{
+    let t = sessionStorage.getItem("diagStart");
+    if(!t){ t = new Date().toLocaleString("ja-JP"); sessionStorage.setItem("diagStart", t); }
+    return t;
+  }catch(e){ return new Date().toLocaleString("ja-JP"); }
+})();
+const DEVICE = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? "モバイル" : "PC";
+let formStarted = false;
+let completed = false;
+let trackTimer = null;
+
+function buildRecord(status){
+  // 入力中の値も画面から直接読み取る（自動入力対策）
+  BASIC_FIELDS.forEach(f=>{
+    const el = document.getElementById("f_"+f.key);
+    if(el) basic[f.key] = el.value;
+  });
+  const indEl = document.getElementById("f_industry");
+  if(indEl) basic.industry = indEl.value;
+
+  const sc = calcScores();
+  const answered = QUESTIONS.filter(q=>qa[q.id]!=null).length;
+  const rec = {
+    sessionId: SESSION_ID, status,
+    progress: "回答 "+answered+"/15問・ページ "+Math.min(page+1,TOTAL_PAGES)+"/"+TOTAL_PAGES,
+    startedAt: STARTED_AT, device: DEVICE,
+    name: basic.name, brand: basic.brand, email: basic.email,
+    phone: basic.phone, website: basic.website, instagram: basic.instagram,
+    industry: basic.industry, sales: basic.sales.join("・"),
+    scoreA: sc.A, scoreB: sc.B, scoreC: sc.C, scoreD: sc.D, scoreE: sc.E,
+  };
+  QUESTIONS.forEach(q=>{ rec[q.id] = getLabel(q.id); });
+  return rec;
+}
+
+function sendTrack(rec){
+  if(!GAS_URL) return;
+  const body = JSON.stringify(rec);
+  let sent = false;
+  if(navigator.sendBeacon){
+    try{ sent = navigator.sendBeacon(GAS_URL, new Blob([body],{type:"text/plain;charset=utf-8"})); }catch(e){}
+  }
+  if(!sent){
+    fetch(GAS_URL,{method:"POST",mode:"no-cors",keepalive:true,body}).catch(err=>console.error("送信エラー:",err));
+  }
+}
+
+function track(status, immediate){
+  if(completed) return;
+  clearTimeout(trackTimer);
+  if(immediate){
+    sendTrack(buildRecord(status));
+  }else{
+    trackTimer = setTimeout(()=>{ if(!completed) sendTrack(buildRecord(status)); }, 1200);
+  }
+}
+
+// 離脱時（タブを閉じる・別アプリへ移動など）に最終状態を送信
+window.addEventListener("pagehide", ()=>{
+  if(formStarted && !completed) sendTrack(buildRecord("途中離脱"));
+});
+document.addEventListener("visibilitychange", ()=>{
+  if(document.visibilityState==="hidden" && formStarted && !completed){
+    sendTrack(buildRecord("途中離脱"));
+  }
+});
 // ═══════════════════════════════════════════
 // 診断データ
 // ═══════════════════════════════════════════
@@ -397,7 +478,6 @@ const QUESTIONS = [
     {l:"まず情報収集",s:{E:2}},{l:"できれば挑戦したい",s:{A:1}},{l:"条件が合えば",s:{A:2,B:2}},
     {l:"本格的に挑戦したい",s:{D:3}},{l:"1年で海外実績を作りたい",s:{D:4}}]},
 ];
-
 const GROUPS = [
   {en:"Brand Status",    jp:"ブランドの現在地"},
   {en:"Purpose",         jp:"海外挑戦の目的"},
@@ -443,7 +523,6 @@ const BASIC_FIELDS = [
 ];
 const INDUSTRY = ["アパレル","ジュエリー","アクセサリー","バッグ","靴","工芸","インテリア","アート","美容","ライフスタイル雑貨","食品以外のプロダクト","その他"];
 const SALES = ["EC","店舗","POPUP","展示会","卸","受注販売","SNS販売","その他"];
-
 // ═══════════════════════════════════════════
 // 状態管理
 // ═══════════════════════════════════════════
@@ -464,7 +543,7 @@ function show(id){
   });
   window.scrollTo({top:0,behavior:"smooth"});
 }
-function startForm(){ page=0; show("formPhase"); renderPage(); updateProgress(); }
+function startForm(){ page=0; formStarted=true; show("formPhase"); renderPage(); updateProgress(); track("診断開始", true); }
 function showPrivacy(from){ privacyFrom=from; show("privacyPhase"); }
 function closePrivacy(){ privacyFrom==="form" ? show("formPhase") : show("introPhase"); }
 function updateProgress(){
@@ -525,13 +604,13 @@ function renderPage(){
           <span class="field-jp jp">${f.label}</span>
           ${f.req?'<span class="field-req">required</span>':''}
         </div>
-        <input type="${f.type}" id="f_${f.key}" value="${basic[f.key]||''}" oninput="basic['${f.key}']=this.value">
+        <input type="${f.type}" id="f_${f.key}" value="${basic[f.key]||''}" oninput="basic['${f.key}']=this.value;track('基本情報入力中')">
         <div class="err-text" id="err_${f.key}"></div>
       </div>`;
     });
     html += `<div class="field">
       <div class="field-head"><span class="field-en">Industry</span><span class="field-jp jp">業種</span></div>
-      <select id="f_industry" onchange="basic.industry=this.value">
+      <select id="f_industry" onchange="basic.industry=this.value;track('基本情報入力中')">
         <option value="">選択してください</option>
         ${INDUSTRY.map(o=>`<option ${basic.industry===o?'selected':''}>${o}</option>`).join("")}
       </select>
@@ -571,17 +650,18 @@ function renderPage(){
 function selectChoice(qid, idx){
   qa[qid]=idx;
   renderPage();
+  track("回答中");
 }
 function toggleSales(o, el){
   if(basic.sales.includes(o)) basic.sales=basic.sales.filter(s=>s!==o);
   else basic.sales.push(o);
   el.classList.toggle("on");
+  track("基本情報入力中");
 }
 function toggleAgree(e){
   agreed=!agreed;
   document.getElementById("agreeBox").classList.toggle("on",agreed);
 }
-
 // ═══════════════════════════════════════════
 // ナビゲーション
 // ═══════════════════════════════════════════
@@ -596,6 +676,7 @@ function goNext(){
     page++;
     renderPage();
     window.scrollTo({top:0,behavior:"smooth"});
+    track(page < GROUPS.length ? "回答中" : "基本情報入力中", true);
   } else {
     if(!validateBasic()) return;
     try{
@@ -684,6 +765,10 @@ function finish(){
   const info=TYPE[top];
 
   const rec={
+    sessionId:SESSION_ID,
+    startedAt:STARTED_AT,
+    device:DEVICE,
+    progress:"回答 15/15問・完了",
     timestamp:new Date().toLocaleString("ja-JP"),
     name:basic.name, brand:basic.brand, email:basic.email,
     phone:basic.phone, website:basic.website, instagram:basic.instagram,
@@ -693,25 +778,19 @@ function finish(){
   rec.scoreA=corr.A; rec.scoreB=corr.B; rec.scoreC=corr.C; rec.scoreD=corr.D; rec.scoreE=corr.E;
   rec.resultType=top; rec.resultName=info.name;
   rec.best1=info.best3[0]; rec.best2=info.best3[1]; rec.best3=info.best3[2];
-  rec.status="診断回答済み";
+  rec.status="診断完了";
 
   currentResult={type:top,info,scores:corr,rec};
 
-  // GASへ送信（Vercel上では正常に動作します）
-  if(GAS_URL){
-    fetch(GAS_URL,{
-      method:"POST",
-      mode:"no-cors",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(rec)
-    }).catch(err=>console.error("GAS送信エラー:",err));
-  }
+  // GASへ送信（完了データで行を確定）
+  clearTimeout(trackTimer);
+  completed=true;
+  sendTrack(rec);
 
   renderResult();
   show("resultPhase");
   document.getElementById("progressWrap").classList.add("hidden");
 }
-
 // ═══════════════════════════════════════════
 // 結果画面
 // ═══════════════════════════════════════════
@@ -803,7 +882,7 @@ function downloadCSV(){
   const v=[r.timestamp,r.name,r.brand,r.email,r.phone,r.website,r.instagram,r.industry,r.sales,
     r.Q1,r.Q2,r.Q3,r.Q4,r.Q5,r.Q6,r.Q7,r.Q8,r.Q9,r.Q10,r.Q11,r.Q12,r.Q13,r.Q14,r.Q15,
     r.scoreA,r.scoreB,r.scoreC,r.scoreD,r.scoreE,r.resultType,r.resultName,r.best1,r.best2,r.best3,r.status];
-  const csv="\uFEFF"+h.join(",")+"\n"+v.map(x=>`"${String(x??"").replace(/"/g,'""')}"`).join(",");
+  const csv="﻿"+h.join(",")+"\n"+v.map(x=>`"${String(x??"").replace(/"/g,'""')}"`).join(",");
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8;"}));
   a.download=`diagnosis_${r.brand}.csv`;
